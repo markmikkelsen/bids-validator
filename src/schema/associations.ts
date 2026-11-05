@@ -1,7 +1,7 @@
 import type { Aslcontext, Associations, Bval, Bvec, Channels, Events } from '@bids/schema/context'
 import type { Schema as MetaSchema } from '@bids/schema/metaschema'
 
-import type { Issue } from '../types/issues.ts'
+import { IssueError } from '../issues/datasetIssues.ts'
 import type { BIDSFile } from '../types/filetree.ts'
 import type { BIDSContext } from './context.ts'
 import { loadJSON } from '../files/json.ts'
@@ -83,7 +83,7 @@ const associationLookup: Record<string, LoadFunction> = {
     const rows = parseBvalBvec(contents)
 
     if (rows.some((row) => row.length !== rows[0].length)) {
-      throw { key: 'BVEC_ROW_LENGTH' }
+      throw new IssueError({ code: 'BVEC_ROW_LENGTH' })
     }
 
     return {
@@ -129,6 +129,23 @@ const associationLookup: Record<string, LoadFunction> = {
     return {
       path: file.path,
       probe_name: columns.get('probe_name'),
+    }
+  },
+  scans: async (
+    file: BIDSFile,
+    options: LoadOptions,
+  ): Promise<{ path: string; duration?: number; acq_time?: string }> => {
+    const columns = await loadTSV(file, options.maxRows)
+      .catch((_e) => {
+        return new Map()
+      })
+    const row = columns.get('filename')?.findIndex((f: string) => file.path.endsWith(f))
+    // Undefined if duration is missing or row is -1 (filename not found in scans file)
+    const duration = columns.get('duration')?.[row]
+    return {
+      path: file.path,
+      duration: duration ? Number(duration) : undefined,
+      acq_time: columns.get('acq_time')?.[row],
     }
   },
   physio: async (
@@ -191,11 +208,8 @@ export async function buildAssociations(
         rule.target?.entities ?? [],
       ).next().value
     } catch (error: unknown) {
-      if (
-        error && typeof error === 'object' && 'code' in error &&
-        error.code === 'MULTIPLE_INHERITABLE_FILES'
-      ) {
-        context.dataset.issues.add(error as Issue)
+      if (error instanceof IssueError && error.issue.code === 'MULTIPLE_INHERITABLE_FILES') {
+        context.dataset.issues.add(error.issue)
         continue
       } else {
         throw error
@@ -221,8 +235,8 @@ export async function buildAssociations(
         Object.assign(associations, {
           [key]: await load(file, options).catch(
             (error: unknown) => {
-              if (error && typeof error === 'object' && 'code' in error) {
-                context.dataset.issues.add({ ...(error as Issue), location })
+              if (error instanceof IssueError) {
+                context.dataset.issues.add({ ...error.issue, location })
               }
               return undefined
             },
